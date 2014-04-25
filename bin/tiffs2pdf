@@ -1,7 +1,32 @@
 #!/usr/bin/env bash
-# bail on errors and show debugging stuff
+
+# Author: Doug Emery <emeryr@upenn.edu>
+
 read -r -d '' HELP <<-'EOF'
 HELP TEXT HERE
+
+Given a SOURCE_DIR containing PDF's create a PDF of all the PDF's combined. Thus: 
+
+    $ tiffs2pdf /path/to/my_tiffs
+
+`tiffs2pdf` will create a PDF in the directory with the same name as the
+source directory base name + `.pdf`: 
+
+    /path/to/my_tiffs/my_tiffs.pdf
+
+NOTE: This script is designed for SCETI-generated images. SCETI always generates
+a reference TIFF with each set of images. This file is named something like:
+
+    mscoll955_box7_folder9_test\ ref\ 1.tif 
+
+This script will skip any TIFF with `ref` in its name.  Obviously, this could
+cause problem with some file name patterns. If that problem comes up, we can
+fix the script then.
+
+If needed, each TIFF is shrunk to a maximum pixel length of 1800 pixels on its
+longest side, and converted to a PDF with 150 DPI density. As a matter of
+course the sub-image at index 1 is deleted. This is done to remove embedded 
+thumbnails in SCETI TIFFs. 
 
 EOF
 
@@ -37,7 +62,7 @@ usage() {
    echo <<EOF
 
 Create a PDF from all TIFFs in SOURCE_DIR. It is assumed that TIFF lexical
-order is correct for PDF order.
+order is correct for PDF page order.
 EOF
 }
 
@@ -63,6 +88,11 @@ while getopts "h" opt; do
   esac
 done
 
+# TODO: Add options for max px size and density
+# TODO: Add options for splitting large folders into multiple PDFs
+# TODO: Add option for cleaning up work folders or not
+# TODO: Make it possible to convert JPEGs as well
+
 shift $((OPTIND-1))
 
 
@@ -82,7 +112,7 @@ filelist=$tmp.1
 ls "$SOURCE_DIR"/*.tif | grep -v ref > $filelist
 
 if [ ! -s $filelist ]; then
-  error "No TIFF's found in SOURCE_DIR: $SOURCE_DIR"
+  error "No TIFFs found in SOURCE_DIR: $SOURCE_DIR"
 fi
 
 PDF_DIR="$SOURCE_DIR/pdf"
@@ -98,6 +128,7 @@ do
   # jpg="$PDF_DIR/${base}.jpg"
   pdf="$PDF_DIR/${base}.pdf"
 
+  # TODO: Be smart at deleting sub images; use identify to find thumbnail
   # Convert  the image to a pdf, remove any thumbnail, shrink to 1800 px on
   # long side (do not enlarge; the '\>' operator), set px density to 150.
   convert "$image" -delete 1--1 -resize 1800x1800\> -density 150 "$pdf"
