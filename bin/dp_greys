@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+
+cmd=`basename $0`
+
+read -r -d '' HELP <<-'EOF'
+
+Create greyscale TIFFs and JPEGs in the Daily Penn destination folder.
+
+Each file's basename will be used to construct the destination
+directory unless the YYYY_MM parameter is provided. Output paths for
+an input file named 1908_10_06_0001.tif would be:
+
+    <DAILY_PENN_DEST>/1908/1908_01/1908_10_06_0001.tif
+    <DAILY_PENN_DEST>/1908/1908_01/JPEG/1908_10_06_0001.jpg
+
+IMPORTANT: All TIFF files in the TIFF_DIR must match YYYY_MM_ and
+begin with the same YYYY_MM sequence. You can override the YYYY_MM
+output dir with the -d flag:
+
+$ dp_greys -d 1908_ALL 1908/Output        # out: <DAILY_PENN_DEST>/1908_ALL
+$ dp_greys -d 1908_10 1908/Output         # out: <DAILY_PENN_DEST>/1908/1908_10
+$ dp_greys -d /absolute/path 1908/Output  # out: /absolute/path
+
+The override output directory may be an alternate YYYY_MM value, a
+relative path, or an absolute path.
+
+EOF
+
+################################################################################
+### ENV
+
+
+DEST_DEFAULT=/mnt/dpredux/DP
+
+usage() {
+   echo "Usage: $cmd [options] TIFF_DIR"
+   echo ""
+   echo "Convert each TIFF in TIFF_DIR to a grayscale TIFF and JPEG,"
+   echo "outputting them to the DAILY_PENN_DEST directory; default is:"
+   echo ""
+   echo "          $DEST_DEFAULT"
+   echo ""
+   echo "Options"
+   echo ""
+   echo " -h         Print help"
+   echo " -d         Output directory; YYYY_MM, or abs. or rel. path"
+   echo ""
+}
+
+# check if input matches YYYY_MM; fail if not
+yyyy_mm_pattern() {
+    if ! echo "$1" | grep "^[0-9][0-9][0-9][0-9]_[0-9][0-9]$" >/dev/null ; then
+        return 1
+    else
+        return 0
+    fi
+}
+
+# Extract YYYY_MM pattern for input directory; return pattern if only
+# one found; fail otherwise.
+get_yyyy_mm() {
+    gym_tiff_dir=$1
+
+    # make sure there's only one pattern in the folder
+    gym_patterns=`ls $gym_tiff_dir/*.tif | sed 's!.*/!!' | awk -F_ '{ print $1 "_" $2 }' | sort | uniq`
+    gym_count=`echo $gym_patterns | wc -w`
+    if [ $gym_count -ne 1 ]; then
+        echo "Expected one YYYY_MM file pattern; found $gym_count: " $gym_patterns >&2
+        return 1
+    fi
+
+    # make sure the pattern matches YYYY_MM
+    if yyyy_mm_pattern $gym_patterns; then
+        echo "$gym_patterns"
+        return 0
+    else
+        echo "YYYY_MM pattern failure: $1" >&2
+        return 1
+    fi
+}
+
+### OPTIONS
+while getopts "hd:" opt; do
+    case $opt in
+        h)
+            usage
+            echo "$HELP"
+            exit 1
+            ;;
+        d)
+            OUTDIR=$OPTARG
+            ;;
+        \?)
+            echo "ERROR Invalid option: -$OPTARG" >&2
+            echo ""
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+shift $((OPTIND-1))
+
+if [ $# -ne 1 ]; then
+    echo "Please provide a TIFF_DIR" >&2
+    usage
+    exit 1
+else
+    dir=$1
+fi
+
+if [ ! -d "$dir" ]; then
+  echo "Not a valid directory: $dir"
+  exit 1
+fi
+
+DAILY_PENN_DEST=${DAILY_PENN_DEST:-$DEST_DEFAULT}
+if [ -d $DAILY_PENN_DEST ]; then
+    echo "Using DAILY_PENN_DEST directory: $DAILY_PENN_DEST"
+else
+    echo "Invalid DAILY_PENN_DEST directory" >&2
+    usage
+    exit 1
+fi
+
+if [ -n "$OUTDIR" ]; then
+    if yyyy_mm_pattern $OUTDIR; then
+        out_rel_path=`echo $OUTDIR | awk -F_ '{ print $1 "/" $0 }'`
+        OUTDIR=$DAILY_PENN_DEST/$out_rel_path
+    elif echo $OUTDIR grep "^/" >/dev/null ; then
+        :
+    else
+        OUTDIR=$DAILY_PENN_DEST/$OUTDIR
+    fi
+else
+    YYYY_MM=`get_yyyy_mm $dir`
+    if [ $? -ne 0 ]; then
+        usage
+        exit 1
+    else
+        out_rel_path=`echo $YYYY_MM | awk -F_ '{ print $1 "/" $0 }'`
+        OUTDIR=$DAILY_PENN_DEST/$out_rel_path
+    fi
+fi
+
+echo "Using output directory: $OUTDIR"
+if [ ! -d $OUTDIR ]; then
+    echo "Creating output directory: $OUTDIR"
+    if ! mkdir -p $OUTDIR ; then
+        echo "Error create $OUTDIR" >&2
+        usage
+        exit 1
+    fi
+fi
+
+file_list=/tmp/tmp_file_list$$.txt
+cd "$dir"
+ls *.[tT][iI][fF] > $file_list
+
+if [ ! -s $file_list ]; then
+  echo "No TIFF files found in $dir"
+  exit 1
+fi
+
+# make sure files are group writable
+umask 0002
+
+total=`wc -l $file_list | awk '{ print $1 }'`
+count=1
+width=$(( `echo "$total" | wc -m` - 1 ))
+echo "total: $total ; count: $count ; width: $width"
+
+while read file
+do
+  the_date=`date`
+  printf "===  %0${width}d/%d %-30s %s\n" $count $total "$the_date" "$file"
+  # get the name of the output files
+  base=`basename "$file" .tif`
+  gray="${OUTDIR}/${base}.tif"
+  jpg="${OUTDIR}/${base}.jpg"
+
+  if [ "$file" -nt $gray ]; then
+      # set opts to delete if there's an embedded thumbnail
+      images=`identify "$file" | wc -l`
+      if [ $images -eq 2 ]; then
+          echo "  Found thumbnail in $file"
+          opts="-delete 1--1"
+      else
+          opts=
+      fi
+
+      # get the number of a samples per pixel; s/b 3 (RGB) or 1 (mono)
+      samples=`exiftool -SamplesPerPixel "$file" | awk '{ print $NF }'`
+
+      # if there's already 1 sample, we don't need to convert to grayscale
+      if [ $samples -eq 1 ]; then
+          echo "File is grayscale: $file"
+          if [ -n "$opts" ]; then
+              echo "  Remove thumbnail: $file -> $gray"
+              convert "$file" $opts "$gray"
+          else
+              # opts not set, no change needed; just copy the file
+              echo "  Copy: $file -> $gray"
+              cp "$file" "$gray"
+              # copied files have botched permissions
+              chmod 664 "$gray"
+          fi
+          # must be 3 samples; convert to mono
+      else
+          echo "  File is RGB: $file"
+          echo "  Convert: $file -> $gray"
+          opts="$opts -set colorspace Gray -channel R -separate -depth 8"
+          convert "$file" $opts "$gray"
+      fi
+
+      if [ ! -f "$gray" ]; then
+          echo "Output file not created: $file"
+          exit 1
+      fi
+
+      # finally, convert the grayscale image to JPEG
+      echo "  Create JPEG: $gray -> $jpg"
+      convert "$gray" -quality 60% "$jpg"
+  else
+      echo "   Skipping newer file: $gray"
+  fi
+  count=$(( $count + 1 ))
+done < $file_list
+
+echo "`date` I finished doing stuff; bye"
+
+rm -f $file_list
